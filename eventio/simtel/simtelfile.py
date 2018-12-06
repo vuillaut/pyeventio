@@ -55,14 +55,18 @@
 
 
 """
+import warnings
 import logging
 from eventio.base import EventIOFile, EventIOObject
+
 
 class WrongType(Exception):
     pass
 
+
 class NoTrackEvents(Exception):
     pass
+
 
 class WithNextAssert:
     '''MixIn for EventIoFile adding `next_assert`'''
@@ -82,7 +86,7 @@ class WithNextAssert:
             try:
                 self._last_obj = next(self)
             except StopIteration:
-                raise WrongType
+                raise WrongType("Last object reached next assert")
 
         o = self._last_obj
         if not isinstance(o, object_):
@@ -108,7 +112,7 @@ class WithNextAssert:
             try:
                 self._last_obj = next(self)
             except StopIteration:
-                raise WrongType
+                raise WrongType("Last object reached or none")
 
         o = self._last_obj
         if not isinstance(o, object_):
@@ -208,7 +212,9 @@ class SimTelFile:
                 if 'event' in event:
                     return shower, event
             except NoTrackEvents:
-                logging.warning('skipping event: no TrackEvents')
+                warnings.warn('Skipping event: no TrackEvents')
+                logging.warning('Skipping event: no TrackEvents')
+
     def fetch_next_event(self):
         try:
             event = self.next_mc_event()
@@ -227,8 +233,7 @@ class SimTelFile:
 
         # There is for sure exactly one of these
         result['mc_event'] = self.file_.next_assert(SimTelMCEvent).parse_data_field()
-        result['corsika_tel_data'] = self.file_.next_type_or_none(
-            CORSIKATelescopeData)
+        result['corsika_tel_data'] = self.file_.next_type_or_none(CORSIKATelescopeData)
 
         self.update_moni_lascal()
         try:
@@ -260,7 +265,6 @@ class SimTelFile:
             pass
 
 
-
 class EventIOFileWithNextAssert(EventIOFile, WithNextAssert):
     pass
 
@@ -278,15 +282,16 @@ def telescope_description_from(file_):
 
 
 def read_all_of_type(f, type_, converter=lambda x: x):
+    print(type_)
     result = []
     while True:
         try:
-            result.append(
-                converter(
-                    f.next_assert(type_)
-                )
-            )
-        except WrongType:
+            o = f.next_assert(type_)
+            if hasattr(o, 'telescope_id'):
+                print(o.telescope_id)
+            result.append(converter(o))
+        except WrongType as e:
+            print(repr(e))
             break
     return result
 
@@ -313,7 +318,10 @@ def parse_event(event):
             1 shower
     '''
     result = {}
-    result['cent_event'] = event.next_assert(SimTelCentEvent).parse_data_field()
+    centevent = event.next_assert(SimTelCentEvent)
+    result['cent_event'] = centevent.parse_data_field()
+    result['cent_event']['global_count'] = centevent.global_count
+
     tel_events = read_all_of_type(
         event,
         SimTelTelEvent,
@@ -375,7 +383,7 @@ def parse_tel_event(tel_event):
     if adc_stuff is None:
         adc_stuff = tel_event.next_type_or_none(SimTelTelADCSum)
         if adc_stuff is None:
-            raise WrongType
+            raise WrongType("No adc data found")
         waveform = adc_stuff.parse_data_field()[..., None]
     else:
         waveform = adc_stuff.parse_data_field()
