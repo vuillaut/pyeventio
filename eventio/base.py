@@ -1,12 +1,12 @@
 import struct
 import gzip
 import logging
-import warnings
 
 from .file_types import is_gzip, is_eventio, is_zstd
 from .header import parse_header_bytes, get_bits_from_word
 from . import constants
 from .exceptions import WrongType
+from collections import deque
 
 try:
     import zstandard as zstd
@@ -20,10 +20,23 @@ KNOWN_OBJECTS = {}
 
 
 class EventIOFile:
+    '''
+    A File that provides low-level access to EventIO files.
+
+    An ``EventIOFile`` is an iterable the ``EventIOObjects``` in it's
+    sublevel.
+
+    This EventIOFile supports uncompressed, gzipped and zstandard compressed files.
+    Uncompressed and gzip compressed files are back-seekable, although
+    this comes with a hefty performance penalty for gzip files.
+    zstandard files are not back-seekable.
+
+    '''
 
     def __init__(self, path):
         log.info('Opening new file {}'.format(path))
         self.path = path
+        self._objectcache = deque()
 
         if not is_eventio(path):
             raise ValueError('File {} is not an eventio file'.format(path))
@@ -50,7 +63,21 @@ class EventIOFile:
         self._next_header_pos = 0
         return self
 
+    def peek(self):
+        '''
+        return the next EventIOObject, without advancing the iterator
+        '''
+        if not self._objectcache:
+            try:
+                self._objectcache.append(next(self))
+            except StopIteration:
+                return None
+        return self._objectcache[0]
+
     def __next__(self):
+        if self._objectcache:
+            return self._objectcache.popleft()
+
         self._filehandle.seek(self._next_header_pos)
         header = read_next_header_toplevel(self)
         self._next_header_pos = self._filehandle.tell() + header.length
@@ -181,6 +208,8 @@ class EventIOObject:
         self.first_byte = self.header.data_field_first_byte
         self.length = self.header.length
         self.only_subobjects = self.header.only_subobjects
+        if self.only_subobjects:
+            self._objectcache = deque()
         self._next_header_pos = 0
 
     def read(self, size=-1):
@@ -210,11 +239,29 @@ class EventIOObject:
         self._next_header_pos = 0
         return self
 
+    def peek(self):
+        '''
+        return the next EventIOObject, without advancing the iterator
+        '''
+        if not self.only_subobjects:
+            raise ValueError(
+                'Only EventIOObjects that contain just subobjects are peekable'
+            )
+        if not self._objectcache:
+            try:
+                self._objectcache.append(next(self))
+            except StopIteration:
+                return None
+        return self._objectcache[0]
+
     def __next__(self):
         if not self.only_subobjects:
             raise ValueError(
                 'Only EventIOObjects that contain just subobjects are iterable'
             )
+
+        if self._objectcache:
+            return self._objectcache.popleft()
 
         if self._next_header_pos >= self.header.length:
             raise StopIteration
